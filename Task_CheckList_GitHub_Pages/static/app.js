@@ -1,6 +1,7 @@
 'use strict';
 
-const csrf = document.querySelector('meta[name="csrf-token"]').content;
+// GitHub Pages is static hosting. Pending tasks are kept ONLY in this browser.
+const STORAGE_KEY = 'mytasks-pending-v1';
 const subjects = {
   CCSB3133: 'Critical Infrastructure Security',
   CCSB4122: 'Information Security Management',
@@ -11,11 +12,12 @@ const subjects = {
   CSNB4423: 'Parallel Computing',
   GENERAL: 'General / Personal',
 };
+const types = ['Assignment', 'Quiz', 'Midterm', 'Final Exam', 'Project', 'Other'];
 const $ = id => document.getElementById(id);
 let tasks = [];
 let editingId = null;
 let toastTimer = null;
-let previousCompletedId = null;
+let lastCompleted = null;
 const dialog = $('task-dialog');
 const form = $('task-form');
 
@@ -54,22 +56,39 @@ function friendlyDue(due) {
   }
   return { label, tone: when < now ? 'overdue' : dayDiff <= 1 ? 'soon' : '' };
 }
-async function api(path, options = {}) {
-  const res = await fetch(path, {
-    ...options,
-    headers: { 'Content-Type': 'application/json', 'X-CSRF-Token': csrf, ...options.headers },
-  });
-  const data = await res.json();
-  if (!res.ok) throw new Error(data.error || 'Something went wrong. Please try again.');
+function validTask(t) {
+  if (!t || typeof t !== 'object' || Array.isArray(t)) return false;
+  if (typeof t.id !== 'string' || t.id.length > 100 || !t.id) return false;
+  if (typeof t.title !== 'string' || !t.title.trim() || t.title.length > 140) return false;
+  if (!Object.hasOwn(subjects, t.subject_code) || !types.includes(t.task_type)) return false;
+  if (typeof t.due_at !== 'string' || !/^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}$/.test(t.due_at)) return false;
+  const [date, time] = t.due_at.split('T');
+  if (new Date(`${date}T${time}:00`).toString() === 'Invalid Date') return false;
+  if (typeof t.notes !== 'string' || t.notes.length > 1500) return false;
+  return true;
+}
+function loadTasks() {
+  const stored = localStorage.getItem(STORAGE_KEY);
+  if (!stored) return [];
+  const data = JSON.parse(stored);
+  if (!Array.isArray(data) || !data.every(validTask)) throw new Error('Saved tasks cannot be read. Please restore a valid backup.');
   return data;
 }
-function toast(message, undoId = null) {
+function persist(next) {
+  // Write first, so a storage failure does not make a task appear saved.
+  localStorage.setItem(STORAGE_KEY, JSON.stringify(next));
+  tasks = next;
+  render();
+}
+function toast(message, allowUndo = false) {
   clearTimeout(toastTimer);
-  previousCompletedId = undoId;
   $('toast-message').textContent = message;
-  $('toast-undo').hidden = undoId === null;
+  $('toast-undo').hidden = !allowUndo;
   $('toast').hidden = false;
-  toastTimer = setTimeout(() => { $('toast').hidden = true; previousCompletedId = null; }, 6500);
+  toastTimer = setTimeout(() => {
+    $('toast').hidden = true;
+    lastCompleted = null;
+  }, 6500);
 }
 function render() {
   const list = $('task-list');
@@ -84,8 +103,7 @@ function render() {
     list.append(empty);
     return;
   }
-  tasks.sort((a,b) => a.due_at.localeCompare(b.due_at) || a.id - b.id);
-  for (const task of tasks) {
+  for (const task of [...tasks].sort((a,b) => a.due_at.localeCompare(b.due_at) || a.id.localeCompare(b.id))) {
     const card = make('article', 'task-card');
     card.dataset.id = task.id;
     const check = make('button', 'task-check');
@@ -119,36 +137,24 @@ function render() {
     list.append(card);
   }
 }
-async function refresh() {
-  try {
-    const data = await api('/api/tasks');
-    tasks = data.tasks;
-    render();
-  } catch (err) {
-    $('task-list').setAttribute('aria-busy', 'false');
-    $('task-list').replaceChildren(make('div', 'error-state', err.message));
-    toast(err.message);
-  }
-}
-async function completeTask(id, card, check) {
+function completeTask(id, card, check) {
+  const completed = tasks.find(t => t.id === id);
+  if (!completed) return;
   check.disabled = true;
   try {
-    await api(`/api/tasks/${id}/complete`, { method:'POST', body:'{}' });
-    check.classList.add('is-checked');
-    card.classList.add('is-exiting');
-    setTimeout(() => { tasks = tasks.filter(t => t.id !== id); render(); }, 210);
-    toast('Task completed. Nicely done!', id);
-  } catch (err) { check.disabled = false; toast(err.message); }
+    persist(tasks.filter(t => t.id !== id));
+    lastCompleted = completed;
+    toast('Task completed. Nicely done!', true);
+  } catch (err) { check.disabled = false; toast(`Could not save: ${err.message}`); }
 }
-async function deleteTask(id) {
+function deleteTask(id) {
   const current = tasks.find(t => t.id === id);
   if (!current || !window.confirm(`Delete "${current.title}" permanently?`)) return;
   try {
-    await api(`/api/tasks/${id}`, { method:'DELETE', body:'{}' });
-    tasks = tasks.filter(t => t.id !== id);
-    render();
+    persist(tasks.filter(t => t.id !== id));
+    lastCompleted = null;
     toast('Task deleted.');
-  } catch (err) { toast(err.message); }
+  } catch (err) { toast(`Could not delete: ${err.message}`); }
 }
 function openDialog(task = null) {
   form.reset();
@@ -169,7 +175,7 @@ function openDialog(task = null) {
   dialog.showModal();
   $('task-title').focus();
 }
-form.addEventListener('submit', async event => {
+form.addEventListener('submit', event => {
   event.preventDefault();
   const save = $('save-task');
   const payload = {
@@ -179,18 +185,18 @@ form.addEventListener('submit', async event => {
     due_at: `${$('task-date').value}T${$('task-time').value || '23:59'}`,
     notes: $('task-notes').value.trim(),
   };
+  if (!payload.title || !Object.hasOwn(subjects,payload.subject_code) || !types.includes(payload.task_type)) return;
   save.disabled = true;
   try {
-    await api(editingId ? `/api/tasks/${editingId}` : '/api/tasks', {
-      method: editingId ? 'PATCH' : 'POST',
-      body: JSON.stringify(payload),
-    });
     const updated = editingId !== null;
+    const task = { id: updated ? editingId : `${Date.now()}-${Math.random().toString(36).slice(2)}`, ...payload };
+    if (!validTask(task)) throw new Error('Check your task details.');
+    persist(updated ? tasks.map(t => t.id === editingId ? task : t) : [...tasks, task]);
+    lastCompleted = null;
     dialog.close();
-    await refresh();
     toast(updated ? 'Task updated.' : 'Task added. You got this!');
   } catch (err) {
-    $('form-error').textContent = err.message;
+    $('form-error').textContent = `Could not save: ${err.message}`;
     $('form-error').hidden = false;
   } finally { save.disabled = false; }
 });
@@ -199,16 +205,51 @@ $('mobile-add').addEventListener('click', () => openDialog());
 $('close-dialog').addEventListener('click', () => dialog.close());
 $('cancel-dialog').addEventListener('click', () => dialog.close());
 dialog.addEventListener('click', event => { if (event.target === dialog) dialog.close(); });
-$('toast-close').addEventListener('click', () => { clearTimeout(toastTimer); $('toast').hidden = true; });
-$('toast-undo').addEventListener('click', async () => {
-  if (previousCompletedId === null) return;
-  const id = previousCompletedId;
-  previousCompletedId = null;
+$('toast-close').addEventListener('click', () => { clearTimeout(toastTimer); $('toast').hidden = true; lastCompleted = null; });
+$('toast-undo').addEventListener('click', () => {
+  if (lastCompleted === null) return;
   try {
-    await api(`/api/tasks/${id}/undo`, { method:'POST', body:'{}' });
-    await refresh();
+    persist([...tasks, lastCompleted]);
+    lastCompleted = null;
     toast('Task restored.');
-  } catch (err) { toast(err.message); }
+  } catch (err) { toast(`Could not restore: ${err.message}`, true); }
+});
+$('export-tasks').addEventListener('click', () => {
+  try {
+    const blob = new Blob([JSON.stringify({ format:'mytasks-v1', exported_at: new Date().toISOString(), tasks }, null, 2)], { type:'application/json' });
+    const url = URL.createObjectURL(blob);
+    const link = document.createElement('a');
+    link.href = url;
+    link.download = `mytasks-backup-${localToday()}.json`;
+    document.body.append(link);
+    link.click();
+    link.remove();
+    setTimeout(() => URL.revokeObjectURL(url), 5000);
+    toast('Backup downloaded.');
+  } catch (err) { toast(`Backup failed: ${err.message}`); }
+});
+$('import-tasks').addEventListener('click', () => $('import-file').click());
+$('import-file').addEventListener('change', async event => {
+  const file = event.target.files?.[0];
+  event.target.value = '';
+  if (!file) return;
+  try {
+    if (file.size > 1024 * 1024) throw new Error('Backup must be smaller than 1 MB.');
+    const data = JSON.parse(await file.text());
+    if (data?.format !== 'mytasks-v1' || !Array.isArray(data.tasks) || !data.tasks.every(validTask)) {
+      throw new Error('This is not a valid My Tasks backup.');
+    }
+    if (new Set(data.tasks.map(t => t.id)).size !== data.tasks.length) throw new Error('Backup contains duplicate task IDs.');
+    if (!window.confirm('Restore this backup? Your current pending tasks on this device will be replaced.')) return;
+    persist(data.tasks);
+    lastCompleted = null;
+    toast('Tasks restored from backup.');
+  } catch (err) { toast(`Restore failed: ${err.message}`); }
 });
 $('today-label').textContent = new Date().toLocaleDateString('en-MY', { day:'numeric', month:'long', year:'numeric' });
-refresh();
+try { tasks = loadTasks(); render(); }
+catch (err) {
+  $('task-list').setAttribute('aria-busy','false');
+  $('task-list').replaceChildren(make('div','error-state',err.message));
+  toast(`Storage error: ${err.message}`);
+}

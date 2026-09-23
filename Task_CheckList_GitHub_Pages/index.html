@@ -4,10 +4,9 @@
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <meta name="theme-color" content="#f8f9fc">
-  <meta name="csrf-token" content="{{ csrf }}">
   <title>My Tasks — Task Checklist</title>
-  <link rel="stylesheet" href="{{ url_for('static', filename='style.css') }}">
-  <script defer src="{{ url_for('static', filename='app.js') }}"></script>
+  <link rel="stylesheet" href="./static/style.css">
+  <script defer src="./static/app.js"></script>
 </head>
 <body>
   <svg class="icon-library" xmlns="http://www.w3.org/2000/svg" aria-hidden="true">
@@ -23,11 +22,11 @@
 
   <div class="page-shell">
     <header class="topbar">
-      <a class="brand" href="/" aria-label="My Tasks home">
+      <a class="brand" href="./" aria-label="My Tasks home">
         <span class="brand-mark"><svg class="icon"><use href="#i-check"></use></svg></span>
         <span>mytasks<span class="brand-dot">.</span></span>
       </a>
-      <span class="topbar-right"><span class="status-dot"></span> Personal workspace</span>
+      <span class="topbar-right"><span class="status-dot"></span> Your personal checklist</span>
     </header>
 
     <main class="content">
@@ -48,7 +47,7 @@
         </div>
       </section>
 
-      <footer class="page-footer"><span>Small steps add up.</span><span id="today-label"></span></footer>
+      <footer class="page-footer"><span>Small steps add up.</span><div class="backup-tools"><button type="button" id="export-tasks" class="text-button" title="Download a backup of your pending tasks">Backup</button><button type="button" id="import-tasks" class="text-button" title="Restore from a backup file">Restore</button><input id="import-file" type="file" accept="application/json,.json" hidden aria-label="Choose a backup JSON file"><span id="today-label"></span></div></footer>
     </main>
     <button id="mobile-add" class="mobile-add primary-button" type="button"><svg class="icon"><use href="#i-plus"></use></svg> New task</button>
   </div>
@@ -58,8 +57,20 @@
       <div class="dialog-header"><div><span class="eyebrow dialog-eyebrow">YOUR NEXT STEP</span><h2 id="dialog-title">Create a task</h2></div><button id="close-dialog" class="icon-button" type="button" aria-label="Close"><svg class="icon"><use href="#i-close"></use></svg></button></div>
       <div class="form-grid">
         <label class="form-field full"><span>Task name <span class="required">*</span></span><input id="task-title" name="title" type="text" maxlength="140" required placeholder="e.g. Assignment 2"></label>
-        <label class="form-field full"><span>Subject <span class="required">*</span></span><select id="task-subject" name="subject_code" required><option value="" disabled selected>Choose a subject</option>{% for code, name in subjects.items() %}<option value="{{ code }}">{{ name }} ({{ code }})</option>{% endfor %}</select></label>
-        <label class="form-field"><span>Type <span class="required">*</span></span><select id="task-type" name="task_type" required>{% for type in types %}<option value="{{ type }}">{{ type }}</option>{% endfor %}</select></label>
+        <label class="form-field full"><span>Subject <span class="required">*</span></span><select id="task-subject" name="subject_code" required><option value="" disabled selected>Choose a subject</option><option value="CCSB3133">Critical Infrastructure Security (CCSB3133)</option>
+          <option value="CCSB4122">Information Security Management (CCSB4122)</option>
+          <option value="CCSB5213">Malware Analysis (CCSB5213)</option>
+          <option value="CCSB5223">Computer Forensics (CCSB5223)</option>
+          <option value="CEG3433">Project 1 (CEG3433)</option>
+          <option value="CSNB4133">Artificial Intelligence (CSNB4133)</option>
+          <option value="CSNB4423">Parallel Computing (CSNB4423)</option>
+          <option value="GENERAL">General / Personal</option></select></label>
+        <label class="form-field"><span>Type <span class="required">*</span></span><select id="task-type" name="task_type" required><option value="Assignment">Assignment</option>
+          <option value="Quiz">Quiz</option>
+          <option value="Midterm">Midterm</option>
+          <option value="Final Exam">Final Exam</option>
+          <option value="Project">Project</option>
+          <option value="Other">Other</option></select></label>
         <label class="form-field"><span>Due date <span class="required">*</span></span><input id="task-date" name="due_date" type="date" required></label>
         <label class="form-field full"><span>Due time <span class="optional">optional, defaults to 11:59 PM</span></span><input id="task-time" name="due_time" type="time"></label>
         <label class="form-field full"><span>Notes <span class="optional">optional</span></span><textarea id="task-notes" name="notes" rows="3" maxlength="1500" placeholder="Anything you'd like to remember…"></textarea></label>
