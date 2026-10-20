@@ -1,7 +1,9 @@
 'use strict';
 
-// GitHub Pages is static hosting. Pending tasks are kept ONLY in this browser.
-const STORAGE_KEY = 'mytasks-pending-v1';
+const API_URL = 'https://task-checklist-api.muhammadhaziqzack03.workers.dev';
+const DEVICE_KEY_STORAGE = 'mytasks-device-key-v1';
+const LEGACY_STORAGE_KEY = 'mytasks-pending-v1';
+
 const subjects = {
   CCSB3133: 'Critical Infrastructure Security',
   CCSB4122: 'Information Security Management',
@@ -12,244 +14,1160 @@ const subjects = {
   CSNB4423: 'Parallel Computing',
   GENERAL: 'General / Personal',
 };
+
+const reverseSubjects = Object.fromEntries(
+  Object.entries(subjects).map(([code, name]) => [name, code])
+);
+
 const types = ['Assignment', 'Quiz', 'Midterm', 'Final Exam', 'Project', 'Other'];
+
 const $ = id => document.getElementById(id);
+
 let tasks = [];
 let editingId = null;
 let toastTimer = null;
 let lastCompleted = null;
+let deviceKey = '';
+
 const dialog = $('task-dialog');
 const form = $('task-form');
 
 function svg(name) {
-  const icon = document.createElementNS('http://www.w3.org/2000/svg', 'svg');
+  const icon = document.createElementNS(
+    'http://www.w3.org/2000/svg',
+    'svg'
+  );
+
   icon.setAttribute('class', 'icon');
   icon.setAttribute('aria-hidden', 'true');
-  const use = document.createElementNS('http://www.w3.org/2000/svg', 'use');
+
+  const use = document.createElementNS(
+    'http://www.w3.org/2000/svg',
+    'use'
+  );
+
   use.setAttribute('href', `#i-${name}`);
+
   icon.append(use);
+
   return icon;
 }
+
 function make(tag, className, text) {
   const el = document.createElement(tag);
-  if (className) el.className = className;
-  if (text !== undefined) el.textContent = text;
+
+  if (className) {
+    el.className = className;
+  }
+
+  if (text !== undefined) {
+    el.textContent = text;
+  }
+
   return el;
 }
+
 function localToday() {
   const now = new Date();
-  return `${now.getFullYear()}-${String(now.getMonth()+1).padStart(2,'0')}-${String(now.getDate()).padStart(2,'0')}`;
+
+  return `${now.getFullYear()}-${String(
+    now.getMonth() + 1
+  ).padStart(2, '0')}-${String(now.getDate()).padStart(2, '0')}`;
 }
+
 function friendlyDue(due) {
-  const when = new Date(due);
+  const when = new Date(`${due}:00`);
   const now = new Date();
-  const start = new Date(now.getFullYear(), now.getMonth(), now.getDate());
-  const day = new Date(when.getFullYear(), when.getMonth(), when.getDate());
-  const dayDiff = Math.round((day - start) / 86400000);
+
+  const start = new Date(
+    now.getFullYear(),
+    now.getMonth(),
+    now.getDate()
+  );
+
+  const day = new Date(
+    when.getFullYear(),
+    when.getMonth(),
+    when.getDate()
+  );
+
+  const dayDiff = Math.round(
+    (day - start) / 86400000
+  );
+
   let label;
-  if (when < now) label = 'Overdue';
-  else if (dayDiff === 0) label = 'Today';
-  else if (dayDiff === 1) label = 'Tomorrow';
-  else label = when.toLocaleDateString('en-MY', { day: 'numeric', month: 'short', year: when.getFullYear() !== now.getFullYear() ? 'numeric' : undefined });
-  if (due.slice(11,16) !== '23:59') {
-    label += ` · ${when.toLocaleTimeString('en-MY', { hour: 'numeric', minute: '2-digit' })}`;
+
+  if (when < now) {
+    label = 'Overdue';
+  } else if (dayDiff === 0) {
+    label = 'Today';
+  } else if (dayDiff === 1) {
+    label = 'Tomorrow';
+  } else {
+    label = when.toLocaleDateString('en-MY', {
+      day: 'numeric',
+      month: 'short',
+      year:
+        when.getFullYear() !== now.getFullYear()
+          ? 'numeric'
+          : undefined,
+    });
   }
-  return { label, tone: when < now ? 'overdue' : dayDiff <= 1 ? 'soon' : '' };
+
+  if (due.slice(11, 16) !== '23:59') {
+    label += ` · ${when.toLocaleTimeString('en-MY', {
+      hour: 'numeric',
+      minute: '2-digit',
+    })}`;
+  }
+
+  return {
+    label,
+    tone:
+      when < now
+        ? 'overdue'
+        : dayDiff <= 1
+          ? 'soon'
+          : '',
+  };
 }
+
+function normalizeTask(row) {
+  const subjectCode = Object.hasOwn(subjects, row.subject)
+    ? row.subject
+    : reverseSubjects[row.subject] || 'GENERAL';
+
+  return {
+    id: String(row.id),
+    title: row.task_name,
+    subject_code: subjectCode,
+    task_type: row.task_type,
+    due_at: `${row.due_date}T${row.due_time || '23:59'}`,
+    notes: row.notes || '',
+  };
+}
+
+function taskPayload(task) {
+  return {
+    subject: task.subject_code,
+    task_name: task.title,
+    task_type: task.task_type,
+    due_date: task.due_at.slice(0, 10),
+    due_time: task.due_at.slice(11, 16),
+    notes: task.notes || '',
+  };
+}
+
 function validTask(t) {
-  if (!t || typeof t !== 'object' || Array.isArray(t)) return false;
-  if (typeof t.id !== 'string' || t.id.length > 100 || !t.id) return false;
-  if (typeof t.title !== 'string' || !t.title.trim() || t.title.length > 140) return false;
-  if (!Object.hasOwn(subjects, t.subject_code) || !types.includes(t.task_type)) return false;
-  if (typeof t.due_at !== 'string' || !/^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}$/.test(t.due_at)) return false;
-  const [date, time] = t.due_at.split('T');
-  if (new Date(`${date}T${time}:00`).toString() === 'Invalid Date') return false;
-  if (typeof t.notes !== 'string' || t.notes.length > 1500) return false;
+  if (
+    !t ||
+    typeof t !== 'object' ||
+    Array.isArray(t)
+  ) {
+    return false;
+  }
+
+  if (!String(t.id || '')) {
+    return false;
+  }
+
+  if (
+    typeof t.title !== 'string' ||
+    !t.title.trim() ||
+    t.title.length > 140
+  ) {
+    return false;
+  }
+
+  if (
+    !Object.hasOwn(subjects, t.subject_code) ||
+    !types.includes(t.task_type)
+  ) {
+    return false;
+  }
+
+  if (
+    typeof t.due_at !== 'string' ||
+    !/^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}$/.test(
+      t.due_at
+    )
+  ) {
+    return false;
+  }
+
+  if (
+    typeof t.notes !== 'string' ||
+    t.notes.length > 1500
+  ) {
+    return false;
+  }
+
   return true;
 }
-function loadTasks() {
-  const stored = localStorage.getItem(STORAGE_KEY);
-  if (!stored) return [];
-  const data = JSON.parse(stored);
-  if (!Array.isArray(data) || !data.every(validTask)) throw new Error('Saved tasks cannot be read. Please restore a valid backup.');
+
+async function api(path, options = {}) {
+  const headers = new Headers(
+    options.headers || {}
+  );
+
+  headers.set(
+    'X-Device-Key',
+    deviceKey
+  );
+
+  if (
+    options.body &&
+    !headers.has('Content-Type')
+  ) {
+    headers.set(
+      'Content-Type',
+      'application/json'
+    );
+  }
+
+  const response = await fetch(
+    `${API_URL}${path}`,
+    {
+      ...options,
+      headers,
+    }
+  );
+
+  const contentType =
+    response.headers.get('content-type') || '';
+
+  const data = contentType.includes(
+    'application/json'
+  )
+    ? await response.json()
+    : await response.text();
+
+  if (!response.ok) {
+    const message =
+      typeof data === 'object' &&
+      data?.error
+        ? data.error
+        : String(
+            data ||
+              `HTTP ${response.status}`
+          );
+
+    const error = new Error(message);
+
+    error.status = response.status;
+
+    throw error;
+  }
+
   return data;
 }
-function persist(next) {
-  // Write first, so a storage failure does not make a task appear saved.
-  localStorage.setItem(STORAGE_KEY, JSON.stringify(next));
-  tasks = next;
-  render();
-}
-function toast(message, allowUndo = false) {
+
+function toast(
+  message,
+  allowUndo = false
+) {
   clearTimeout(toastTimer);
-  $('toast-message').textContent = message;
-  $('toast-undo').hidden = !allowUndo;
+
+  $('toast-message').textContent =
+    message;
+
+  $('toast-undo').hidden =
+    !allowUndo;
+
   $('toast').hidden = false;
+
   toastTimer = setTimeout(() => {
     $('toast').hidden = true;
     lastCompleted = null;
   }, 6500);
 }
+
 function render() {
   const list = $('task-list');
+
   list.replaceChildren();
-  list.setAttribute('aria-busy', 'false');
-  $('pending-count').textContent = tasks.length;
+
+  list.setAttribute(
+    'aria-busy',
+    'false'
+  );
+
+  $('pending-count').textContent =
+    tasks.length;
+
   if (!tasks.length) {
-    const empty = make('div', 'empty-state');
-    const visual = make('div', 'empty-icon');
+    const empty = make(
+      'div',
+      'empty-state'
+    );
+
+    const visual = make(
+      'div',
+      'empty-icon'
+    );
+
     visual.append(svg('spark'));
-    empty.append(visual, make('h3', '', 'All caught up.'), make('p', '', 'Nothing pending. Enjoy the breathing room.'));
+
+    empty.append(
+      visual,
+      make(
+        'h3',
+        '',
+        'All caught up.'
+      ),
+      make(
+        'p',
+        '',
+        'Nothing pending. Enjoy the breathing room.'
+      )
+    );
+
     list.append(empty);
+
     return;
   }
-  for (const task of [...tasks].sort((a,b) => a.due_at.localeCompare(b.due_at) || a.id.localeCompare(b.id))) {
-    const card = make('article', 'task-card');
+
+  const sortedTasks = [...tasks].sort(
+    (a, b) =>
+      a.due_at.localeCompare(
+        b.due_at
+      ) ||
+      Number(a.id) -
+        Number(b.id)
+  );
+
+  for (const task of sortedTasks) {
+    const card = make(
+      'article',
+      'task-card'
+    );
+
     card.dataset.id = task.id;
-    const check = make('button', 'task-check');
+
+    const check = make(
+      'button',
+      'task-check'
+    );
+
     check.type = 'button';
-    check.setAttribute('aria-label', `Complete ${task.title}`);
-    check.title = 'Mark as completed';
+
+    check.setAttribute(
+      'aria-label',
+      `Complete ${task.title}`
+    );
+
+    check.title =
+      'Mark as completed';
+
     check.append(svg('check'));
-    check.addEventListener('click', () => completeTask(task.id, card, check));
-    const main = make('div', 'task-main');
-    const heading = make('h3', 'task-title', task.title);
-    const meta = make('div', 'task-meta');
-    meta.append(make('span', 'task-type', task.task_type), make('span', 'meta-separator'), make('span', 'subject-name', subjects[task.subject_code] || task.subject_code));
-    main.append(heading, meta);
-    if (task.notes) main.append(make('p', 'task-notes', task.notes));
-    const right = make('div', 'card-right');
-    const dueInfo = friendlyDue(task.due_at);
-    const pill = make('span', `due-pill ${dueInfo.tone}`, dueInfo.label);
-    pill.title = `Due ${task.due_at.replace('T', ' ')}`;
-    const actions = make('div', 'card-actions');
-    for (const [name, title, action] of [['pencil','Edit task',()=>openDialog(task)],['trash','Delete task',()=>deleteTask(task.id)]]) {
-      const button = make('button', 'icon-button' + (name === 'trash' ? ' danger' : ''));
+
+    check.addEventListener(
+      'click',
+      () =>
+        completeTask(
+          task.id,
+          check
+        )
+    );
+
+    const main = make(
+      'div',
+      'task-main'
+    );
+
+    const heading = make(
+      'h3',
+      'task-title',
+      task.title
+    );
+
+    const meta = make(
+      'div',
+      'task-meta'
+    );
+
+    meta.append(
+      make(
+        'span',
+        'task-type',
+        task.task_type
+      ),
+      make(
+        'span',
+        'meta-separator'
+      ),
+      make(
+        'span',
+        'subject-name',
+        subjects[
+          task.subject_code
+        ] ||
+          task.subject_code
+      )
+    );
+
+    main.append(
+      heading,
+      meta
+    );
+
+    if (task.notes) {
+      main.append(
+        make(
+          'p',
+          'task-notes',
+          task.notes
+        )
+      );
+    }
+
+    const right = make(
+      'div',
+      'card-right'
+    );
+
+    const dueInfo =
+      friendlyDue(task.due_at);
+
+    const pill = make(
+      'span',
+      `due-pill ${dueInfo.tone}`,
+      dueInfo.label
+    );
+
+    pill.title =
+      `Due ${task.due_at.replace(
+        'T',
+        ' '
+      )}`;
+
+    const actions = make(
+      'div',
+      'card-actions'
+    );
+
+    const buttons = [
+      [
+        'pencil',
+        'Edit task',
+        () => openDialog(task),
+      ],
+      [
+        'trash',
+        'Delete task',
+        () =>
+          deleteTask(task.id),
+      ],
+    ];
+
+    for (const [
+      name,
+      title,
+      action,
+    ] of buttons) {
+      const button = make(
+        'button',
+        'icon-button' +
+          (name === 'trash'
+            ? ' danger'
+            : '')
+      );
+
       button.type = 'button';
       button.title = title;
-      button.setAttribute('aria-label', `${title}: ${task.title}`);
+
+      button.setAttribute(
+        'aria-label',
+        `${title}: ${task.title}`
+      );
+
       button.append(svg(name));
-      button.addEventListener('click', action);
+
+      button.addEventListener(
+        'click',
+        action
+      );
+
       actions.append(button);
     }
-    right.append(pill, actions);
-    card.append(check, main, right);
+
+    right.append(
+      pill,
+      actions
+    );
+
+    card.append(
+      check,
+      main,
+      right
+    );
+
     list.append(card);
   }
 }
-function completeTask(id, card, check) {
-  const completed = tasks.find(t => t.id === id);
-  if (!completed) return;
+
+async function loadTasks() {
+  $('task-list').setAttribute(
+    'aria-busy',
+    'true'
+  );
+
+  const data = await api(
+    '/tasks',
+    {
+      method: 'GET',
+    }
+  );
+
+  tasks = (
+    data.tasks || []
+  )
+    .map(normalizeTask)
+    .filter(validTask);
+
+  render();
+}
+
+async function completeTask(
+  id,
+  check
+) {
+  const completed =
+    tasks.find(
+      t => t.id === id
+    );
+
+  if (!completed) {
+    return;
+  }
+
   check.disabled = true;
+
+  check.classList.add(
+    'is-checked'
+  );
+
   try {
-    persist(tasks.filter(t => t.id !== id));
-    lastCompleted = completed;
-    toast('Task completed. Nicely done!', true);
-  } catch (err) { check.disabled = false; toast(`Could not save: ${err.message}`); }
+    await api(
+      `/tasks/${encodeURIComponent(
+        id
+      )}/complete`,
+      {
+        method: 'PATCH',
+      }
+    );
+
+    tasks = tasks.filter(
+      t => t.id !== id
+    );
+
+    lastCompleted =
+      completed;
+
+    render();
+
+    toast(
+      'Task completed. Nicely done!',
+      true
+    );
+  } catch (err) {
+    check.disabled = false;
+
+    check.classList.remove(
+      'is-checked'
+    );
+
+    toast(
+      `Could not complete task: ${err.message}`
+    );
+  }
 }
-function deleteTask(id) {
-  const current = tasks.find(t => t.id === id);
-  if (!current || !window.confirm(`Delete "${current.title}" permanently?`)) return;
+
+async function deleteTask(id) {
+  const current =
+    tasks.find(
+      t => t.id === id
+    );
+
+  if (
+    !current ||
+    !window.confirm(
+      `Delete "${current.title}" permanently?`
+    )
+  ) {
+    return;
+  }
+
   try {
-    persist(tasks.filter(t => t.id !== id));
+    await api(
+      `/tasks/${encodeURIComponent(
+        id
+      )}`,
+      {
+        method: 'DELETE',
+      }
+    );
+
+    tasks = tasks.filter(
+      t => t.id !== id
+    );
+
     lastCompleted = null;
+
+    render();
+
     toast('Task deleted.');
-  } catch (err) { toast(`Could not delete: ${err.message}`); }
+  } catch (err) {
+    toast(
+      `Could not delete: ${err.message}`
+    );
+  }
 }
+
 function openDialog(task = null) {
   form.reset();
-  editingId = task ? task.id : null;
-  $('dialog-title').textContent = task ? 'Edit task' : 'Create a task';
-  $('save-task').firstChild.textContent = task ? 'Save changes ' : 'Save task ';
-  $('form-error').hidden = true;
+
+  editingId =
+    task ? task.id : null;
+
+  $('dialog-title').textContent =
+    task
+      ? 'Edit task'
+      : 'Create a task';
+
+  $('save-task').firstChild.textContent =
+    task
+      ? 'Save changes '
+      : 'Save task ';
+
+  $('form-error').hidden =
+    true;
+
   if (task) {
-    $('task-title').value = task.title;
-    $('task-subject').value = task.subject_code;
-    $('task-type').value = task.task_type;
-    $('task-date').value = task.due_at.slice(0,10);
-    $('task-time').value = task.due_at.slice(11,16) === '23:59' ? '' : task.due_at.slice(11,16);
-    $('task-notes').value = task.notes;
+    $('task-title').value =
+      task.title;
+
+    $('task-subject').value =
+      task.subject_code;
+
+    $('task-type').value =
+      task.task_type;
+
+    $('task-date').value =
+      task.due_at.slice(
+        0,
+        10
+      );
+
+    $('task-time').value =
+      task.due_at.slice(
+        11,
+        16
+      ) === '23:59'
+        ? ''
+        : task.due_at.slice(
+            11,
+            16
+          );
+
+    $('task-notes').value =
+      task.notes;
   } else {
-    $('task-date').value = localToday();
+    $('task-date').value =
+      localToday();
   }
+
   dialog.showModal();
+
   $('task-title').focus();
 }
-form.addEventListener('submit', event => {
-  event.preventDefault();
-  const save = $('save-task');
-  const payload = {
-    title: $('task-title').value.trim(),
-    subject_code: $('task-subject').value,
-    task_type: $('task-type').value,
-    due_at: `${$('task-date').value}T${$('task-time').value || '23:59'}`,
-    notes: $('task-notes').value.trim(),
-  };
-  if (!payload.title || !Object.hasOwn(subjects,payload.subject_code) || !types.includes(payload.task_type)) return;
-  save.disabled = true;
-  try {
-    const updated = editingId !== null;
-    const task = { id: updated ? editingId : `${Date.now()}-${Math.random().toString(36).slice(2)}`, ...payload };
-    if (!validTask(task)) throw new Error('Check your task details.');
-    persist(updated ? tasks.map(t => t.id === editingId ? task : t) : [...tasks, task]);
-    lastCompleted = null;
-    dialog.close();
-    toast(updated ? 'Task updated.' : 'Task added. You got this!');
-  } catch (err) {
-    $('form-error').textContent = `Could not save: ${err.message}`;
-    $('form-error').hidden = false;
-  } finally { save.disabled = false; }
-});
-$('open-add').addEventListener('click', () => openDialog());
-$('mobile-add').addEventListener('click', () => openDialog());
-$('close-dialog').addEventListener('click', () => dialog.close());
-$('cancel-dialog').addEventListener('click', () => dialog.close());
-dialog.addEventListener('click', event => { if (event.target === dialog) dialog.close(); });
-$('toast-close').addEventListener('click', () => { clearTimeout(toastTimer); $('toast').hidden = true; lastCompleted = null; });
-$('toast-undo').addEventListener('click', () => {
-  if (lastCompleted === null) return;
-  try {
-    persist([...tasks, lastCompleted]);
-    lastCompleted = null;
-    toast('Task restored.');
-  } catch (err) { toast(`Could not restore: ${err.message}`, true); }
-});
-$('export-tasks').addEventListener('click', () => {
-  try {
-    const blob = new Blob([JSON.stringify({ format:'mytasks-v1', exported_at: new Date().toISOString(), tasks }, null, 2)], { type:'application/json' });
-    const url = URL.createObjectURL(blob);
-    const link = document.createElement('a');
-    link.href = url;
-    link.download = `mytasks-backup-${localToday()}.json`;
-    document.body.append(link);
-    link.click();
-    link.remove();
-    setTimeout(() => URL.revokeObjectURL(url), 5000);
-    toast('Backup downloaded.');
-  } catch (err) { toast(`Backup failed: ${err.message}`); }
-});
-$('import-tasks').addEventListener('click', () => $('import-file').click());
-$('import-file').addEventListener('change', async event => {
-  const file = event.target.files?.[0];
-  event.target.value = '';
-  if (!file) return;
-  try {
-    if (file.size > 1024 * 1024) throw new Error('Backup must be smaller than 1 MB.');
-    const data = JSON.parse(await file.text());
-    if (data?.format !== 'mytasks-v1' || !Array.isArray(data.tasks) || !data.tasks.every(validTask)) {
-      throw new Error('This is not a valid My Tasks backup.');
+
+form.addEventListener(
+  'submit',
+  async event => {
+    event.preventDefault();
+
+    const save =
+      $('save-task');
+
+    const task = {
+      id:
+        editingId ||
+        'new',
+
+      title:
+        $('task-title')
+          .value
+          .trim(),
+
+      subject_code:
+        $('task-subject')
+          .value,
+
+      task_type:
+        $('task-type')
+          .value,
+
+      due_at:
+        `${$('task-date').value}T${
+          $('task-time').value ||
+          '23:59'
+        }`,
+
+      notes:
+        $('task-notes')
+          .value
+          .trim(),
+    };
+
+    if (!validTask(task)) {
+      $('form-error').textContent =
+        'Please check the task details.';
+
+      $('form-error').hidden =
+        false;
+
+      return;
     }
-    if (new Set(data.tasks.map(t => t.id)).size !== data.tasks.length) throw new Error('Backup contains duplicate task IDs.');
-    if (!window.confirm('Restore this backup? Your current pending tasks on this device will be replaced.')) return;
-    persist(data.tasks);
-    lastCompleted = null;
-    toast('Tasks restored from backup.');
-  } catch (err) { toast(`Restore failed: ${err.message}`); }
-});
-$('today-label').textContent = new Date().toLocaleDateString('en-MY', { day:'numeric', month:'long', year:'numeric' });
-try { tasks = loadTasks(); render(); }
-catch (err) {
-  $('task-list').setAttribute('aria-busy','false');
-  $('task-list').replaceChildren(make('div','error-state',err.message));
-  toast(`Storage error: ${err.message}`);
+
+    save.disabled = true;
+
+    $('form-error').hidden =
+      true;
+
+    try {
+      const updated =
+        editingId !== null;
+
+      const path = updated
+        ? `/tasks/${encodeURIComponent(
+            editingId
+          )}`
+        : '/tasks';
+
+      const data =
+        await api(path, {
+          method: updated
+            ? 'PATCH'
+            : 'POST',
+
+          body:
+            JSON.stringify(
+              taskPayload(
+                task
+              )
+            ),
+        });
+
+      const saved =
+        normalizeTask(
+          data.task
+        );
+
+      tasks = updated
+        ? tasks.map(t =>
+            t.id ===
+            editingId
+              ? saved
+              : t
+          )
+        : [
+            ...tasks,
+            saved,
+          ];
+
+      editingId = null;
+
+      lastCompleted =
+        null;
+
+      dialog.close();
+
+      render();
+
+      toast(
+        updated
+          ? 'Task updated.'
+          : 'Task added. You got this!'
+      );
+    } catch (err) {
+      $('form-error').textContent =
+        `Could not save: ${err.message}`;
+
+      $('form-error').hidden =
+        false;
+    } finally {
+      save.disabled = false;
+    }
+  }
+);
+
+$('open-add').addEventListener(
+  'click',
+  () => openDialog()
+);
+
+$('mobile-add').addEventListener(
+  'click',
+  () => openDialog()
+);
+
+$('close-dialog').addEventListener(
+  'click',
+  () => dialog.close()
+);
+
+$('cancel-dialog').addEventListener(
+  'click',
+  () => dialog.close()
+);
+
+dialog.addEventListener(
+  'click',
+  event => {
+    if (
+      event.target === dialog
+    ) {
+      dialog.close();
+    }
+  }
+);
+
+$('toast-close').addEventListener(
+  'click',
+  () => {
+    clearTimeout(
+      toastTimer
+    );
+
+    $('toast').hidden =
+      true;
+
+    lastCompleted =
+      null;
+  }
+);
+
+$('toast-undo').addEventListener(
+  'click',
+  async () => {
+    if (
+      lastCompleted === null
+    ) {
+      return;
+    }
+
+    const restore =
+      lastCompleted;
+
+    try {
+      const data =
+        await api(
+          `/tasks/${encodeURIComponent(
+            restore.id
+          )}/reopen`,
+          {
+            method: 'PATCH',
+          }
+        );
+
+      tasks = [
+        ...tasks,
+        normalizeTask(
+          data.task
+        ),
+      ];
+
+      lastCompleted =
+        null;
+
+      render();
+
+      toast(
+        'Task restored.'
+      );
+    } catch (err) {
+      toast(
+        `Could not restore: ${err.message}`,
+        true
+      );
+    }
+  }
+);
+
+$('export-tasks').addEventListener(
+  'click',
+  () => {
+    try {
+      const blob =
+        new Blob(
+          [
+            JSON.stringify(
+              {
+                format:
+                  'mytasks-v2',
+
+                exported_at:
+                  new Date().toISOString(),
+
+                tasks,
+              },
+              null,
+              2
+            ),
+          ],
+          {
+            type:
+              'application/json',
+          }
+        );
+
+      const url =
+        URL.createObjectURL(
+          blob
+        );
+
+      const link =
+        document.createElement(
+          'a'
+        );
+
+      link.href = url;
+
+      link.download =
+        `mytasks-backup-${localToday()}.json`;
+
+      document.body.append(
+        link
+      );
+
+      link.click();
+
+      link.remove();
+
+      setTimeout(
+        () =>
+          URL.revokeObjectURL(
+            url
+          ),
+        5000
+      );
+
+      toast(
+        'Backup downloaded.'
+      );
+    } catch (err) {
+      toast(
+        `Backup failed: ${err.message}`
+      );
+    }
+  }
+);
+
+$('import-tasks').addEventListener(
+  'click',
+  () =>
+    $('import-file').click()
+);
+
+$('import-file').addEventListener(
+  'change',
+  async event => {
+    const file =
+      event.target.files?.[0];
+
+    event.target.value = '';
+
+    if (!file) {
+      return;
+    }
+
+    try {
+      if (
+        file.size >
+        1024 * 1024
+      ) {
+        throw new Error(
+          'Backup must be smaller than 1 MB.'
+        );
+      }
+
+      const data =
+        JSON.parse(
+          await file.text()
+        );
+
+      if (
+        !Array.isArray(
+          data.tasks
+        )
+      ) {
+        throw new Error(
+          'Invalid backup.'
+        );
+      }
+
+      const imported =
+        data.tasks.filter(
+          validTask
+        );
+
+      if (
+        !imported.length
+      ) {
+        throw new Error(
+          'No valid tasks found in this backup.'
+        );
+      }
+
+      if (
+        !window.confirm(
+          `Import ${imported.length} task(s) into the shared database? Existing tasks will stay.`
+        )
+      ) {
+        return;
+      }
+
+      for (
+        const task
+        of imported
+      ) {
+        await api(
+          '/tasks',
+          {
+            method:
+              'POST',
+
+            body:
+              JSON.stringify(
+                taskPayload(
+                  task
+                )
+              ),
+          }
+        );
+      }
+
+      await loadTasks();
+
+      toast(
+        'Backup imported.'
+      );
+    } catch (err) {
+      toast(
+        `Import failed: ${err.message}`
+      );
+    }
+  }
+);
+
+function getLegacyTaskCount() {
+  try {
+    const legacy =
+      JSON.parse(
+        localStorage.getItem(
+          LEGACY_STORAGE_KEY
+        ) || '[]'
+      );
+
+    return Array.isArray(
+      legacy
+    )
+      ? legacy.length
+      : 0;
+  } catch {
+    return 0;
+  }
 }
+
+async function connectDevice() {
+  const stored =
+    localStorage.getItem(
+      DEVICE_KEY_STORAGE
+    );
+
+  if (stored) {
+    deviceKey = stored;
+    return;
+  }
+
+  const key =
+    window.prompt(
+      'Connect this device\n\nPaste your private DEVICE_KEY. You only need to do this once on this browser.'
+    );
+
+  if (
+    !key ||
+    !key.trim()
+  ) {
+    throw new Error(
+      'This device is not connected yet.'
+    );
+  }
+
+  deviceKey =
+    key.trim();
+
+  await api('/tasks', {
+    method: 'GET',
+  });
+
+  localStorage.setItem(
+    DEVICE_KEY_STORAGE,
+    deviceKey
+  );
+}
+
+async function initialize() {
+  $('today-label').textContent =
+    new Date().toLocaleDateString(
+      'en-MY',
+      {
+        day: 'numeric',
+        month: 'long',
+        year: 'numeric',
+      }
+    );
+
+  try {
+    await connectDevice();
+
+    await loadTasks();
+
+    const legacyCount =
+      getLegacyTaskCount();
+
+    if (
+      legacyCount > 0
+    ) {
+      toast(
+        `${legacyCount} old local task(s) found. Use Backup first if you want to keep them.`
+      );
+    }
+  } catch (err) {
+    if (
+      err.status === 401
+    ) {
+      localStorage.removeItem(
+        DEVICE_KEY_STORAGE
+      );
+
+      deviceKey = '';
+    }
+
+    $('task-list').setAttribute(
+      'aria-busy',
+      'false'
+    );
+
+    $('task-list').replaceChildren(
+      make(
+        'div',
+        'error-state',
+        `${err.message} Refresh the page to try again.`
+      )
+    );
+  }
+}
+
+initialize();
